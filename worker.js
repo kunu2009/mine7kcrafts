@@ -312,24 +312,38 @@ function greedyMeshVoxel(
 }
 
 self.onmessage = function (e) {
-  const { chunkX, chunkZ, seed } = e.data;
-  const data = generateChunkData(chunkX, chunkZ, seed);
+  let data;
+  let shouldTransferData = false;
+
+  // If data is passed in, we are re-meshing. Otherwise, generate a new chunk.
+  if (e.data.data) {
+    data = new Uint8Array(e.data.data);
+  } else {
+    const { chunkX, chunkZ, seed } = e.data;
+    data = generateChunkData(chunkX, chunkZ, seed);
+    shouldTransferData = true; // Only transfer newly generated data
+  }
+
   const geo = greedyMeshVoxel(data);
 
-  self.postMessage(
-    {
-      posArr: geo.posArr.buffer,
-      normArr: geo.normArr.buffer,
-      uvArr: geo.uvArr.buffer,
-      colArr: geo.colArr.buffer,
-      data: data.buffer, // Send the raw chunk data back
-    },
-    [
-      geo.posArr.buffer,
-      geo.normArr.buffer,
-      geo.uvArr.buffer,
-      geo.colArr.buffer,
-      data.buffer, // Transfer the buffer
-    ]
-  );
+  const message = {
+    posArr: geo.posArr.buffer,
+    normArr: geo.normArr.buffer,
+    uvArr: geo.uvArr.buffer,
+    colArr: geo.colArr.buffer,
+  };
+  
+  const transferables = [
+    geo.posArr.buffer,
+    geo.normArr.buffer,
+    geo.uvArr.buffer,
+    geo.colArr.buffer,
+  ];
+
+  if (shouldTransferData) {
+    message.data = data.buffer;
+    transferables.push(data.buffer);
+  }
+
+  self.postMessage(message, transferables);
 };

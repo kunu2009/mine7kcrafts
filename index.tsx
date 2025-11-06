@@ -35,16 +35,17 @@ const PLAYER_WIDTH = 0.6;
 const PLAYER_SPEED = 5;
 const PLAYER_JUMP_FORCE = 6;
 const GRAVITY = -15;
+const RAYCAST_DISTANCE = 5; // Max distance for block interaction
 
 // Simple palette (replace with PBR textures / atlases)
 const MATERIALS = {
-  [BLOCK_DIRT]: { color: "#8B5A2B" },
-  [BLOCK_GRASS]: { color: "#4CAF50" },
-  [BLOCK_STONE]: { color: "#9E9E9E" },
-  [BLOCK_SAND]: { color: "#F4A460" },
-  [BLOCK_LOG]: { color: "#663300" },
-  [BLOCK_LEAVES]: { color: "#006400" },
-  [BLOCK_CACTUS]: { color: "#228B22" },
+  [BLOCK_DIRT]: { color: "#8B5A2B", name: "Dirt" },
+  [BLOCK_GRASS]: { color: "#4CAF50", name: "Grass" },
+  [BLOCK_STONE]: { color: "#9E9E9E", name: "Stone" },
+  [BLOCK_SAND]: { color: "#F4A460", name: "Sand" },
+  [BLOCK_LOG]: { color: "#663300", name: "Log" },
+  [BLOCK_LEAVES]: { color: "#006400", name: "Leaves" },
+  [BLOCK_CACTUS]: { color: "#228B22", name: "Cactus" },
 };
 
 // ---------------------------
@@ -54,6 +55,7 @@ interface ChunkMeshProps {
   chunkX: number;
   chunkZ: number;
   seed?: number;
+  data?: Uint8Array;
   onChunkDataLoaded: (key: string, data: Uint8Array) => void;
 }
 
@@ -61,6 +63,7 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
   chunkX,
   chunkZ,
   seed = 0,
+  data,
   onChunkDataLoaded,
 }) => {
   const meshRef = useRef<THREE.Mesh>(null!);
@@ -74,22 +77,31 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
     const worker = new Worker(new URL("./worker.js", import.meta.url));
 
     worker.onmessage = (e) => {
-      const { posArr, normArr, colArr, data } = e.data;
+      const { posArr, normArr, colArr, data: chunkData } = e.data;
       setGeoData({
         posArr: new Float32Array(posArr),
         normArr: new Float32Array(normArr),
         colArr: new Float32Array(colArr),
       });
-      onChunkDataLoaded(`${chunkX}_${chunkZ}`, new Uint8Array(data));
+      if (chunkData) {
+        onChunkDataLoaded(`${chunkX}_${chunkZ}`, new Uint8Array(chunkData));
+      }
       worker.terminate();
     };
 
-    worker.postMessage({ chunkX, chunkZ, seed });
+    if (data) {
+      // Re-mesh existing data
+      const dataBuffer = data.buffer.slice(0);
+      worker.postMessage({ data: dataBuffer }, [dataBuffer]);
+    } else {
+      // Generate new chunk
+      worker.postMessage({ chunkX, chunkZ, seed });
+    }
 
     return () => {
       worker.terminate();
     };
-  }, [chunkX, chunkZ, seed, onChunkDataLoaded]);
+  }, [chunkX, chunkZ, seed, data, onChunkDataLoaded]);
 
   const geometry = useMemo(() => {
     if (!geoData) return null;
@@ -120,9 +132,16 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
 interface PlayerControlsProps {
   worldData: Map<string, Uint8Array>;
   setIsLocked: React.Dispatch<React.SetStateAction<boolean>>;
+  setBlock: (x: number, y: number, z: number, type: number) => void;
+  selectedBlock: number;
 }
 
-function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
+function PlayerControls({
+  worldData,
+  setIsLocked,
+  setBlock,
+  selectedBlock,
+}: PlayerControlsProps) {
   const { camera, gl } = useThree();
   const velocity = useRef(new THREE.Vector3(0, 0, 0));
   const euler = useRef(new THREE.Euler(0, 0, 0, "YXZ"));
@@ -130,7 +149,8 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
   const isLockedRef = useRef(false);
 
   // Helper: Get block type at world coordinates
-  const getBlock = useCallback((x: number, y: number, z: number) => {
+  const getBlock = useCallback(
+    (x: number, y: number, z: number) => {
       const chunkX = Math.floor(x / CHUNK_SIZE);
       const chunkZ = Math.floor(z / CHUNK_SIZE);
       const chunkKey = `${chunkX}_${chunkZ}`;
@@ -142,15 +162,20 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
       const localZ = Math.floor(z) - chunkZ * CHUNK_SIZE;
 
       if (localY < 0 || localY >= CHUNK_HEIGHT) return BLOCK_AIR;
-      
-      const idx = localX + localZ * CHUNK_SIZE + localY * (CHUNK_SIZE * CHUNK_SIZE);
+
+      const idx =
+        localX +
+        localZ * CHUNK_SIZE +
+        localY * (CHUNK_SIZE * CHUNK_SIZE);
       return chunk[idx];
-  }, [worldData]);
-  
-  const isSolid = (x:number, y:number, z:number) => {
-    const block = getBlock(x,y,z);
+    },
+    [worldData]
+  );
+
+  const isSolid = (x: number, y: number, z: number) => {
+    const block = getBlock(x, y, z);
     return block !== BLOCK_AIR;
-  }
+  };
 
   const moveState = useMemo(
     () => ({
@@ -176,6 +201,7 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code.startsWith('Digit')) return; // Let App handle hotbar keys
       switch (event.code) {
         case "KeyW": moveState.forward = true; break;
         case "KeyA": moveState.left = true; break;
@@ -197,6 +223,77 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
       }
     };
 
+    const raycast = () => {
+      const origin = camera.position;
+      const direction = new THREE.Vector3();
+      camera.getWorldDirection(direction);
+
+      let x = Math.floor(origin.x);
+      let y = Math.floor(origin.y);
+      let z = Math.floor(origin.z);
+
+      const stepX = Math.sign(direction.x);
+      const stepY = Math.sign(direction.y);
+      const stepZ = Math.sign(direction.z);
+
+      const tDeltaX = Math.abs(1 / direction.x);
+      const tDeltaY = Math.abs(1 / direction.y);
+      const tDeltaZ = Math.abs(1 / direction.z);
+
+      let tMaxX = (stepX > 0 ? x + 1 - origin.x : origin.x - x) * tDeltaX;
+      let tMaxY = (stepY > 0 ? y + 1 - origin.y : origin.y - y) * tDeltaY;
+      let tMaxZ = (stepZ > 0 ? z + 1 - origin.z : origin.z - z) * tDeltaZ;
+
+      let hitPos: [number, number, number] | null = null;
+      let placePos: [number, number, number] | null = [x, y, z];
+      let prevPos: [number, number, number] | null = [x, y, z];
+
+      for (let i = 0; i < RAYCAST_DISTANCE / 0.05; i++) {
+        prevPos = [x, y, z];
+        if (tMaxX < tMaxY) {
+          if (tMaxX < tMaxZ) {
+            x += stepX;
+            tMaxX += tDeltaX;
+          } else {
+            z += stepZ;
+            tMaxZ += tDeltaZ;
+          }
+        } else {
+          if (tMaxY < tMaxZ) {
+            y += stepY;
+            tMaxY += tDeltaY;
+          } else {
+            z += stepZ;
+            tMaxZ += tDeltaZ;
+          }
+        }
+
+        if (isSolid(x, y, z)) {
+          hitPos = [x, y, z];
+          placePos = prevPos;
+          break;
+        }
+      }
+
+      return { hitPos, placePos };
+    };
+
+    const onMouseDown = (event: MouseEvent) => {
+      if (!isLockedRef.current) return;
+      const { hitPos, placePos } = raycast();
+
+      if (event.button === 0) { // Left click
+        if (hitPos) {
+          setBlock(hitPos[0], hitPos[1], hitPos[2], BLOCK_AIR);
+        }
+      } else if (event.button === 2) { // Right click
+        if (placePos && hitPos) {
+          setBlock(placePos[0], placePos[1], placePos[2], selectedBlock);
+        }
+      }
+    };
+    
+    const onContextMenu = (event: MouseEvent) => event.preventDefault();
     const onClick = () => gl.domElement.requestPointerLock();
     const onPointerLockChange = () => {
       const locked = document.pointerLockElement === gl.domElement;
@@ -205,6 +302,8 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
     };
 
     gl.domElement.addEventListener("click", onClick);
+    gl.domElement.addEventListener("mousedown", onMouseDown);
+    gl.domElement.addEventListener("contextmenu", onContextMenu);
     document.addEventListener("pointerlockchange", onPointerLockChange);
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("keydown", onKeyDown);
@@ -212,12 +311,14 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
 
     return () => {
       gl.domElement.removeEventListener("click", onClick);
+      gl.domElement.removeEventListener("mousedown", onMouseDown);
+      gl.domElement.removeEventListener("contextmenu", onContextMenu);
       document.removeEventListener("pointerlockchange", onPointerLockChange);
       document.removeEventListener("mousemove", onMouseMove);
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("keyup", onKeyUp);
     };
-  }, [camera, gl, moveState, euler, setIsLocked]);
+  }, [camera, gl, moveState, euler, setIsLocked, getBlock, setBlock, selectedBlock]);
 
   useFrame((_, delta) => {
     if (!isLockedRef.current || worldData.size === 0) return;
@@ -227,52 +328,57 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
     if (moveState.backward) moveDirection.z += 1;
     if (moveState.left) moveDirection.x -= 1;
     if (moveState.right) moveDirection.x += 1;
-    
+
     camera.quaternion.setFromEuler(euler.current);
     moveDirection.normalize().applyQuaternion(camera.quaternion);
 
     velocity.current.x = moveDirection.x * PLAYER_SPEED;
     velocity.current.z = moveDirection.z * PLAYER_SPEED;
     velocity.current.y += GRAVITY * delta;
-    
+
     // Collision detection on each axis
     const halfWidth = PLAYER_WIDTH / 2;
-    
+
     // Y-axis collision
     const dy = velocity.current.y * delta;
-    if (velocity.current.y > 0) { // Moving up
-      if (isSolid(camera.position.x, camera.position.y, camera.position.z)) {
+    if (velocity.current.y < 0) { // Moving down
+      if (
+        isSolid(camera.position.x - halfWidth, camera.position.y + dy, camera.position.z - halfWidth) ||
+        isSolid(camera.position.x + halfWidth, camera.position.y + dy, camera.position.z - halfWidth) ||
+        isSolid(camera.position.x - halfWidth, camera.position.y + dy, camera.position.z + halfWidth) ||
+        isSolid(camera.position.x + halfWidth, camera.position.y + dy, camera.position.z + halfWidth)
+      ) {
+        velocity.current.y = 0;
+        canJump.current = true;
+      }
+    } else { // Moving up
+      if (isSolid(camera.position.x, camera.position.y + PLAYER_HEIGHT, camera.position.z)) {
         velocity.current.y = 0;
       }
-    } else { // Moving down
-        if (isSolid(camera.position.x - halfWidth, camera.position.y + dy, camera.position.z - halfWidth) ||
-            isSolid(camera.position.x + halfWidth, camera.position.y + dy, camera.position.z - halfWidth) ||
-            isSolid(camera.position.x - halfWidth, camera.position.y + dy, camera.position.z + halfWidth) ||
-            isSolid(camera.position.x + halfWidth, camera.position.y + dy, camera.position.z + halfWidth)) {
-            velocity.current.y = 0;
-            canJump.current = true;
-        }
     }
     camera.position.y += velocity.current.y * delta;
 
     // X-axis collision
     const dx = velocity.current.x * delta;
-    if (isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - 0.1, camera.position.z) ||
-        isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - PLAYER_HEIGHT/2, camera.position.z) ||
-        isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - PLAYER_HEIGHT + 0.1, camera.position.z)) {
-        velocity.current.x = 0;
+    if (
+      isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - 0.1, camera.position.z) ||
+      isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - PLAYER_HEIGHT / 2, camera.position.z) ||
+      isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - PLAYER_HEIGHT + 0.1, camera.position.z)
+    ) {
+      velocity.current.x = 0;
     }
     camera.position.x += velocity.current.x * delta;
 
     // Z-axis collision
     const dz = velocity.current.z * delta;
-     if (isSolid(camera.position.x, camera.position.y - 0.1, camera.position.z + dz + Math.sign(dz) * halfWidth) ||
-        isSolid(camera.position.x, camera.position.y - PLAYER_HEIGHT/2, camera.position.z + dz + Math.sign(dz) * halfWidth) ||
-        isSolid(camera.position.x, camera.position.y - PLAYER_HEIGHT + 0.1, camera.position.z + dz + Math.sign(dz) * halfWidth)) {
-        velocity.current.z = 0;
+    if (
+      isSolid(camera.position.x, camera.position.y - 0.1, camera.position.z + dz + Math.sign(dz) * halfWidth) ||
+      isSolid(camera.position.x, camera.position.y - PLAYER_HEIGHT / 2, camera.position.z + dz + Math.sign(dz) * halfWidth) ||
+      isSolid(camera.position.x, camera.position.y - PLAYER_HEIGHT + 0.1, camera.position.z + dz + Math.sign(dz) * halfWidth)
+    ) {
+      velocity.current.z = 0;
     }
     camera.position.z += velocity.current.z * delta;
-    
   });
 
   return null;
@@ -286,13 +392,62 @@ export default function App() {
   const [worldData, setWorldData] = useState<Map<string, Uint8Array>>(() => new Map());
   const [isLocked, setIsLocked] = useState(false);
 
+  // --- Hotbar State ---
+  const hotbarBlocks = useMemo(() => [
+    BLOCK_GRASS, BLOCK_DIRT, BLOCK_STONE, BLOCK_SAND, BLOCK_LOG, BLOCK_LEAVES, BLOCK_CACTUS
+  ], []);
+  const [activeSlot, setActiveSlot] = useState(0);
+  const selectedBlock = hotbarBlocks[activeSlot];
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code.startsWith('Digit')) {
+        const digit = parseInt(event.code.slice(5), 10);
+        if (digit >= 1 && digit <= hotbarBlocks.length) {
+          setActiveSlot(digit - 1);
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [hotbarBlocks.length]);
+
+
   const handleChunkDataLoaded = useCallback((key: string, data: Uint8Array) => {
-    setWorldData(prevData => {
+    setWorldData((prevData) => {
       const newData = new Map(prevData);
       newData.set(key, data);
       return newData;
     });
   }, []);
+
+  const setBlock = useCallback(
+    (worldX: number, worldY: number, worldZ: number, type: number) => {
+      const chunkX = Math.floor(worldX / CHUNK_SIZE);
+      const chunkZ = Math.floor(worldZ / CHUNK_SIZE);
+      const chunkKey = `${chunkX}_${chunkZ}`;
+
+      const localX = Math.floor(worldX) - chunkX * CHUNK_SIZE;
+      const localY = Math.floor(worldY);
+      const localZ = Math.floor(worldZ) - chunkZ * CHUNK_SIZE;
+
+      if (localY < 0 || localY >= CHUNK_HEIGHT) return;
+
+      const chunkData = worldData.get(chunkKey);
+      if (!chunkData) return;
+
+      const newChunkData = new Uint8Array(chunkData);
+      const idx = localX + localZ * CHUNK_SIZE + localY * (CHUNK_SIZE * CHUNK_SIZE);
+      newChunkData[idx] = type;
+
+      setWorldData((prevData) => {
+        const newData = new Map(prevData);
+        newData.set(chunkKey, newChunkData);
+        return newData;
+      });
+    },
+    [worldData]
+  );
 
   const chunks = useMemo(() => {
     // simple 3x3 chunk grid around origin
@@ -302,21 +457,58 @@ export default function App() {
     return arr;
   }, []);
 
+  // --- UI Styles ---
   const crosshairStyle: CSSProperties = {
-    position: "absolute", top: "50%", left: "50%",
-    transform: "translate(-50%, -50%)", color: "white",
-    fontSize: "24px", pointerEvents: "none",
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    color: "white",
+    fontSize: "24px",
+    pointerEvents: "none",
   };
 
   const instructionsStyle: CSSProperties = {
-    position: "absolute", top: "50%", left: "50%",
-    transform: "translate(-50%, -50%)", backgroundColor: "rgba(0,0,0,0.7)",
-    color: "white", padding: "20px", borderRadius: "10px",
-    textAlign: "center", pointerEvents: "none",
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    backgroundColor: "rgba(0,0,0,0.7)",
+    color: "white",
+    padding: "20px",
+    borderRadius: "10px",
+    textAlign: "center",
+    pointerEvents: "none",
   };
+  
+  const hotbarStyle: CSSProperties = {
+    position: 'absolute',
+    bottom: '20px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    display: 'flex',
+    gap: '5px',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: '5px',
+    borderRadius: '5px',
+    pointerEvents: 'none',
+  };
+  
+  const slotStyle: (isActive: boolean) => CSSProperties = (isActive) => ({
+    width: '50px',
+    height: '50px',
+    border: isActive ? '2px solid white' : '2px solid gray',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'white',
+    fontSize: '10px',
+    textAlign: 'center',
+    userSelect: 'none',
+  });
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
       <Canvas shadows dpr={[1, 2]}>
         <ambientLight intensity={0.4} />
         <directionalLight
@@ -330,25 +522,47 @@ export default function App() {
         <Sky sunPosition={[100, 200, 100]} turbidity={6} />
 
         {chunks.map(([cx, cz]) => (
-          <ChunkMesh 
-            key={`${cx}_${cz}`} 
-            chunkX={cx} 
-            chunkZ={cz} 
+          <ChunkMesh
+            key={`${cx}_${cz}`}
+            chunkX={cx}
+            chunkZ={cz}
             seed={seed}
+            data={worldData.get(`${cx}_${cz}`)}
             onChunkDataLoaded={handleChunkDataLoaded}
           />
         ))}
 
-        <PlayerControls worldData={worldData} setIsLocked={setIsLocked} />
+        <PlayerControls
+          worldData={worldData}
+          setIsLocked={setIsLocked}
+          setBlock={setBlock}
+          selectedBlock={selectedBlock}
+        />
       </Canvas>
       {isLocked ? (
-        <div style={crosshairStyle}>+</div>
+        <>
+            <div style={crosshairStyle}>+</div>
+            <div style={hotbarStyle}>
+                {hotbarBlocks.map((blockType, index) => (
+                    <div
+                        key={index}
+                        style={{
+                            ...slotStyle(index === activeSlot),
+                            backgroundColor: MATERIALS[blockType]?.color || '#000',
+                        }}
+                    >
+                        {MATERIALS[blockType]?.name}
+                    </div>
+                ))}
+            </div>
+        </>
       ) : (
         <div style={instructionsStyle}>
           <h1>Click to Play</h1>
           <p>W, A, S, D to move</p>
           <p>Space to jump</p>
           <p>Mouse to look</p>
+          <p>1-7 to select block</p>
         </div>
       )}
     </div>
