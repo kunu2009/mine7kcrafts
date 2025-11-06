@@ -8,6 +8,7 @@ import React, {
   CSSProperties,
   useCallback,
 } from "react";
+import { createRoot } from "react-dom/client";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Sky } from "@react-three/drei";
 import * as THREE from "three";
@@ -349,4 +350,16 @@ export default function App() {
       </Canvas>
     </div>
   );
+}
+
+const container = document.getElementById("root");
+if (container) {
+  const root = createRoot(container);
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+} else {
+  console.error("Root container missing in index.html");
 }
