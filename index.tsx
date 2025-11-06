@@ -143,7 +143,7 @@ function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
 
       if (localY < 0 || localY >= CHUNK_HEIGHT) return BLOCK_AIR;
       
-      const idx = localY + localZ * CHUNK_HEIGHT + localX * CHUNK_HEIGHT * CHUNK_SIZE;
+      const idx = localX + localZ * CHUNK_SIZE + localY * (CHUNK_SIZE * CHUNK_SIZE);
       return chunk[idx];
   }, [worldData]);
   

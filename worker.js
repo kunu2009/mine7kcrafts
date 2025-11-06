@@ -69,8 +69,8 @@ function getBiome(x, z, seed) {
 // The core world generation function with biomes, caves, and features
 function generateChunkData(cx, cz, seed = 0) {
   const data = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
-  const indexOf = (x, y, z) =>
-    y + z * CHUNK_HEIGHT + x * CHUNK_HEIGHT * CHUNK_SIZE;
+  // Using a standard X, Z, Y data layout. X changes fastest, then Z, then Y.
+  const indexOf = (x, y, z) => x + z * CHUNK_SIZE + y * (CHUNK_SIZE * CHUNK_SIZE);
 
   // Helper to safely set a block within the chunk's data array
   const setBlock = (x, y, z, type) => {
@@ -234,9 +234,9 @@ function greedyMeshVoxel(
   const uvs = [];
   const colors = [];
 
-  // Helper to calculate index from (x, y, z) coordinates based on the X, Z, Y data layout.
+  // Helper to calculate index from (x, y, z) coordinates.
   // This layout is X-major, then Z, then Y.
-  const indexOf = (x, y, z) => y + z * sy + x * (sy * sz);
+  const indexOf = (x, y, z) => x + z * sx + y * (sx * sz);
 
   // Helper to get block type at coordinates, handles boundary checks.
   const getBlock = (x, y, z) => {
@@ -255,10 +255,10 @@ function greedyMeshVoxel(
     { dir: [0, 0, 1], corners: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]] }, // +Z (Front)
   ];
 
-  // Iterate over each block in the chunk in the same order as data generation for cache efficiency.
-  for (let x = 0; x < sx; x++) {
+  // Iterate over each block in the chunk.
+  for (let y = 0; y < sy; y++) {
     for (let z = 0; z < sz; z++) {
-      for (let y = 0; y < sy; y++) {
+      for (let x = 0; x < sx; x++) {
         const blockType = getBlock(x, y, z);
         if (blockType === BLOCK_AIR) continue;
 
