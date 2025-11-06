@@ -36,21 +36,76 @@ const MATERIALS = {
 // UTILS: Noise & World Gen
 // ---------------------------
 
-// 3D pseudo-random number generator
-function pseudoNoise(x, y, z, seed = 0) {
+// 3D hash function for pseudo-random numbers from coordinates
+function hash(x, y, z, seed = 0) {
   const n =
     Math.sin(x * 127.1 + y * 311.7 + z * 522.1 + seed * 1013.0) * 43758.5453;
   return n - Math.floor(n);
 }
 
+// Cosine interpolation for smooth transitions
+function interpolate(a, b, t) {
+    const ft = t * Math.PI;
+    const f = (1 - Math.cos(ft)) * 0.5;
+    return a * (1 - f) + b * f;
+}
+
+// 2D Coherent Noise function using interpolation
+function coherentNoise2D(x, z, seed) {
+    const ix = Math.floor(x);
+    const iz = Math.floor(z);
+    const fx = x - ix;
+    const fz = z - iz;
+
+    const v1 = hash(ix, 0, iz, seed);
+    const v2 = hash(ix + 1, 0, iz, seed);
+    const v3 = hash(ix, 0, iz + 1, seed);
+    const v4 = hash(ix + 1, 0, iz + 1, seed);
+
+    const i1 = interpolate(v1, v2, fx);
+    const i2 = interpolate(v3, v4, fx);
+
+    return interpolate(i1, i2, fz);
+}
+
+// 3D Coherent Noise function using interpolation
+function coherentNoise3D(x, y, z, seed) {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    const iz = Math.floor(z);
+    const fx = x - ix;
+    const fy = y - iy;
+    const fz = z - iz;
+
+    const v000 = hash(ix, iy, iz, seed);
+    const v100 = hash(ix + 1, iy, iz, seed);
+    const v010 = hash(ix, iy + 1, iz, seed);
+    const v110 = hash(ix + 1, iy + 1, iz, seed);
+    const v001 = hash(ix, iy, iz + 1, seed);
+    const v101 = hash(ix + 1, iy, iz + 1, seed);
+    const v011 = hash(ix, iy + 1, iz + 1, seed);
+    const v111 = hash(ix + 1, iy + 1, iz + 1, seed);
+    
+    const i1 = interpolate(v000, v100, fx);
+    const i2 = interpolate(v010, v110, fx);
+    const i3 = interpolate(v001, v101, fx);
+    const i4 = interpolate(v011, v111, fx);
+
+    const j1 = interpolate(i1, i2, fy);
+    const j2 = interpolate(i3, i4, fy);
+
+    return interpolate(j1, j2, fz);
+}
+
+
 // Multi-octave fractal noise for more natural terrain
-function octaveNoise(x, z, seed, octaves, persistence, lacunarity, scale) {
+function octaveNoise2D(x, z, seed, octaves, persistence, lacunarity, scale) {
   let total = 0;
   let frequency = scale;
   let amplitude = 1;
   let maxValue = 0; // Used for normalizing result to 0-1 range
   for (let i = 0; i < octaves; i++) {
-    total += pseudoNoise(x * frequency, 0, z * frequency, seed) * amplitude;
+    total += coherentNoise2D(x * frequency, z * frequency, seed + i) * amplitude;
     maxValue += amplitude;
     amplitude *= persistence;
     frequency *= lacunarity;
@@ -58,9 +113,10 @@ function octaveNoise(x, z, seed, octaves, persistence, lacunarity, scale) {
   return total / maxValue;
 }
 
+
 // Determine biome based on large-scale noise
 function getBiome(x, z, seed) {
-  const noise = octaveNoise(x, z, seed + 1, 3, 0.5, 2, 0.005);
+  const noise = octaveNoise2D(x, z, seed + 1, 3, 0.5, 2, 0.005);
   if (noise < 0.33) return BIOME_DESERT;
   if (noise < 0.66) return BIOME_PLAINS;
   return BIOME_FOREST;
@@ -97,15 +153,15 @@ function generateChunkData(cx, cz, seed = 0) {
       switch (biome) {
         case BIOME_DESERT:
           terrainHeight =
-            60 + octaveNoise(worldX, worldZ, seed, 4, 0.5, 2, 0.02) * 10;
+            60 + octaveNoise2D(worldX, worldZ, seed, 4, 0.5, 2, 0.02) * 10;
           break;
         case BIOME_FOREST:
           terrainHeight =
-            70 + octaveNoise(worldX, worldZ, seed, 6, 0.5, 2, 0.015) * 30;
+            70 + octaveNoise2D(worldX, worldZ, seed, 6, 0.5, 2, 0.015) * 30;
           break;
         default: // BIOME_PLAINS
           terrainHeight =
-            64 + octaveNoise(worldX, worldZ, seed, 5, 0.5, 2, 0.02) * 15;
+            64 + octaveNoise2D(worldX, worldZ, seed, 5, 0.5, 2, 0.02) * 15;
           break;
       }
       terrainHeight = Math.floor(terrainHeight);
@@ -126,7 +182,7 @@ function generateChunkData(cx, cz, seed = 0) {
     }
   }
 
-  // Step 2: Carve caves using 3D noise
+  // Step 2: Carve caves using 3D coherent noise for smoother tunnels
   const CAVE_SCALE = 0.08;
   for (let x = 0; x < CHUNK_SIZE; x++) {
     for (let z = 0; z < CHUNK_SIZE; z++) {
@@ -134,13 +190,13 @@ function generateChunkData(cx, cz, seed = 0) {
         if (data[indexOf(x, y, z)] === BLOCK_STONE) {
           const worldX = cx * CHUNK_SIZE + x;
           const worldZ = cz * CHUNK_SIZE + z;
-          const noiseVal = pseudoNoise(
+          const noiseVal = coherentNoise3D(
             worldX * CAVE_SCALE,
             y * CAVE_SCALE,
             worldZ * CAVE_SCALE,
             seed + 2
           );
-          if (noiseVal > 0.75) {
+          if (noiseVal > 0.65) {
             setBlock(x, y, z, BLOCK_AIR);
           }
         }
@@ -165,7 +221,7 @@ function generateChunkData(cx, cz, seed = 0) {
       const worldZ = cz * CHUNK_SIZE + z;
       const biome = getBiome(worldX, worldZ, seed);
       const surfaceBlock = data[indexOf(x, surfaceY, z)];
-      const featureNoise = pseudoNoise(worldX, 0, worldZ, seed + 3);
+      const featureNoise = hash(worldX, 0, worldZ, seed + 3);
 
       if (biome === BIOME_FOREST && surfaceBlock === BLOCK_GRASS) {
         if (
@@ -176,7 +232,7 @@ function generateChunkData(cx, cz, seed = 0) {
           z < CHUNK_SIZE - 2
         ) {
           const treeHeight =
-            4 + Math.floor(pseudoNoise(worldX, 1, worldZ, seed + 4) * 3);
+            4 + Math.floor(hash(worldX, 1, worldZ, seed + 4) * 3);
           if (surfaceY + treeHeight + 2 < CHUNK_HEIGHT) {
             for (let i = 1; i <= treeHeight; i++)
               setBlock(x, surfaceY + i, z, BLOCK_LOG);
@@ -205,7 +261,7 @@ function generateChunkData(cx, cz, seed = 0) {
       } else if (biome === BIOME_DESERT && surfaceBlock === BLOCK_SAND) {
         if (featureNoise > 0.98) {
           const cactusHeight =
-            2 + Math.floor(pseudoNoise(worldX, 1, worldZ, seed + 4) * 2);
+            2 + Math.floor(hash(worldX, 1, worldZ, seed + 4) * 2);
           if (surfaceY + cactusHeight < CHUNK_HEIGHT) {
             for (let i = 1; i <= cactusHeight; i++)
               setBlock(x, surfaceY + i, z, BLOCK_CACTUS);
