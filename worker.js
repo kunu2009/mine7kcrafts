@@ -322,12 +322,14 @@ self.onmessage = function (e) {
       normArr: geo.normArr.buffer,
       uvArr: geo.uvArr.buffer,
       colArr: geo.colArr.buffer,
+      data: data.buffer, // Send the raw chunk data back
     },
     [
       geo.posArr.buffer,
       geo.normArr.buffer,
       geo.uvArr.buffer,
       geo.colArr.buffer,
+      data.buffer, // Transfer the buffer
     ]
   );
 };
