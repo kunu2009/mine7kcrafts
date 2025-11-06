@@ -138,7 +138,12 @@ function generateChunkData(cx, cz, seed = 0) {
       z >= 0 &&
       z < CHUNK_SIZE
     ) {
-      data[indexOf(x, y, z)] = type;
+      const idx = indexOf(x, y, z);
+      // Only place leaves in empty air blocks to avoid overwriting trunk
+      if (type === BLOCK_LEAVES && data[idx] !== BLOCK_AIR) {
+          return;
+      }
+      data[idx] = type;
     }
   };
 
@@ -231,29 +236,35 @@ function generateChunkData(cx, cz, seed = 0) {
           z > 2 &&
           z < CHUNK_SIZE - 2
         ) {
-          const treeHeight =
-            4 + Math.floor(hash(worldX, 1, worldZ, seed + 4) * 3);
-          if (surfaceY + treeHeight + 2 < CHUNK_HEIGHT) {
-            for (let i = 1; i <= treeHeight; i++)
+          const treeHeight = 4 + Math.floor(hash(worldX, 1, worldZ, seed + 4) * 3);
+          const canopyTopY = surfaceY + treeHeight;
+          
+          if (canopyTopY + 2 < CHUNK_HEIGHT) {
+            // Build the trunk first
+            for (let i = 1; i <= treeHeight; i++) {
               setBlock(x, surfaceY + i, z, BLOCK_LOG);
-            const radius = 2;
-            for (let ly = -radius; ly <= radius; ly++) {
-              for (let lx = -radius; lx <= radius; lx++) {
-                for (let lz = -radius; lz <= radius; lz++) {
-                  if (lx * lx + ly * ly + lz * lz <= radius * radius) {
-                    if (
-                      data[indexOf(x + lx, surfaceY + treeHeight + ly, z + lz)] ===
-                      BLOCK_AIR
-                    ) {
-                      setBlock(
-                        x + lx,
-                        surfaceY + treeHeight + ly,
-                        z + lz,
-                        BLOCK_LEAVES
-                      );
-                    }
-                  }
+            }
+
+            // Build the leafy canopy in layers for a more natural look
+            // Main body of leaves (a 5x5 area, 2 blocks high, with corners cut)
+            for (let ly = -1; ly <= 0; ly++) {
+              const y = canopyTopY + ly;
+              for (let lx = -2; lx <= 2; lx++) {
+                for (let lz = -2; lz <= 2; lz++) {
+                  // Prune the corners to make it feel more organic and circular
+                  if (Math.abs(lx) === 2 && Math.abs(lz) === 2) continue;
+                  setBlock(x + lx, y, z + lz, BLOCK_LEAVES);
                 }
+              }
+            }
+
+            // Top layer of leaves (a 3x3 cross shape)
+            const topY = canopyTopY + 1;
+            for (let lx = -1; lx <= 1; lx++) {
+              for (let lz = -1; lz <= 1; lz++) {
+                // Make a cross shape, not a square
+                if (Math.abs(lx) + Math.abs(lz) > 1) continue;
+                setBlock(x + lx, topY, z + lz, BLOCK_LEAVES);
               }
             }
           }
