@@ -196,7 +196,7 @@ function generateChunkData(cx, cz, seed = 0) {
             worldZ * CAVE_SCALE,
             seed + 2
           );
-          if (noiseVal > 0.65) {
+          if (noiseVal > 0.68) { // Increased threshold to reduce surface holes
             setBlock(x, y, z, BLOCK_AIR);
           }
         }

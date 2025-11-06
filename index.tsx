@@ -7,6 +7,8 @@ import React, {
   useMemo,
   CSSProperties,
   useCallback,
+  forwardRef,
+  useImperativeHandle,
 } from "react";
 import { createRoot } from "react-dom/client";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
@@ -30,12 +32,13 @@ const BLOCK_LEAVES = 6;
 const BLOCK_CACTUS = 7;
 
 // Player settings
-const PLAYER_HEIGHT = 1.8;
+const PLAYER_HEIGHT = 1.8; // This is eye-height from feet
 const PLAYER_WIDTH = 0.6;
 const PLAYER_SPEED = 5;
 const PLAYER_JUMP_FORCE = 6;
 const GRAVITY = -15;
 const RAYCAST_DISTANCE = 5; // Max distance for block interaction
+const RENDER_DISTANCE = 3; // In chunks (3 = 7x7 grid)
 
 // Simple palette (replace with PBR textures / atlases)
 const MATERIALS = {
@@ -49,6 +52,83 @@ const MATERIALS = {
 };
 
 // ---------------------------
+// IndexedDB Helper Functions for Persistence
+// ---------------------------
+const DB_NAME = "VoxelcraftDB";
+const DB_VERSION = 1;
+const CHUNK_STORE_NAME = "chunks";
+
+const openDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject("Error opening DB");
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      db.createObjectStore(CHUNK_STORE_NAME);
+    };
+  });
+};
+
+const saveChunkToDB = async (key: string, data: Uint8Array) => {
+  const db = await openDB();
+  const transaction = db.transaction(CHUNK_STORE_NAME, "readwrite");
+  const store = transaction.objectStore(CHUNK_STORE_NAME);
+  store.put(data, key);
+};
+
+const loadChunkFromDB = async (key: string): Promise<Uint8Array | null> => {
+    const db = await openDB();
+    const transaction = db.transaction(CHUNK_STORE_NAME, "readonly");
+    const store = transaction.objectStore(CHUNK_STORE_NAME);
+    const request = store.get(key);
+    return new Promise((resolve) => {
+        request.onsuccess = () => {
+            resolve(request.result ? new Uint8Array(request.result) : null);
+        };
+        request.onerror = () => resolve(null);
+    });
+};
+
+// ---------------------------
+// Particle Component: for block-breaking effect
+// ---------------------------
+interface ParticleProps {
+    id: number;
+    position: THREE.Vector3;
+    color: string;
+    onDone: (id: number) => void;
+}
+
+const Particle: React.FC<ParticleProps> = ({ id, position, color, onDone }) => {
+    const meshRef = useRef<THREE.Mesh>(null!);
+    const velocity = useRef(new THREE.Vector3(
+        (Math.random() - 0.5) * 3,
+        Math.random() * 3 + 1,
+        (Math.random() - 0.5) * 3
+    ));
+    const life = useRef(0);
+
+    useFrame((_, delta) => {
+        if (!meshRef.current) return;
+        velocity.current.y -= 9.8 * delta; // Gravity
+        meshRef.current.position.addScaledVector(velocity.current, delta);
+        life.current += delta;
+        if (life.current > 0.75) {
+            onDone(id);
+        }
+    });
+
+    return (
+        <mesh ref={meshRef} position={position}>
+            <boxGeometry args={[0.1, 0.1, 0.1]} />
+            <meshStandardMaterial color={color} />
+        </mesh>
+    );
+};
+
+
+// ---------------------------
 // Chunk Component: builds a single Mesh from chunk data using a worker
 // ---------------------------
 interface ChunkMeshProps {
@@ -56,7 +136,7 @@ interface ChunkMeshProps {
   chunkZ: number;
   seed?: number;
   data?: Uint8Array;
-  onChunkDataLoaded: (key: string, data: Uint8Array) => void;
+  onChunkGenerated: (key: string, data: Uint8Array) => void;
 }
 
 const ChunkMesh: React.FC<ChunkMeshProps> = ({
@@ -64,7 +144,7 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
   chunkZ,
   seed = 0,
   data,
-  onChunkDataLoaded,
+  onChunkGenerated,
 }) => {
   const meshRef = useRef<THREE.Mesh>(null!);
   const [geoData, setGeoData] = useState<{
@@ -84,7 +164,7 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
         colArr: new Float32Array(colArr),
       });
       if (chunkData) {
-        onChunkDataLoaded(`${chunkX}_${chunkZ}`, new Uint8Array(chunkData));
+        onChunkGenerated(`${chunkX}_${chunkZ}`, new Uint8Array(chunkData));
       }
       worker.terminate();
     };
@@ -101,7 +181,7 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
     return () => {
       worker.terminate();
     };
-  }, [chunkX, chunkZ, seed, data, onChunkDataLoaded]);
+  }, [chunkX, chunkZ, seed, data, onChunkGenerated]);
 
   const geometry = useMemo(() => {
     if (!geoData) return null;
@@ -132,45 +212,36 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
 interface PlayerControlsProps {
   worldData: Map<string, Uint8Array>;
   setIsLocked: React.Dispatch<React.SetStateAction<boolean>>;
+  getBlock: (x: number, y: number, z: number) => number;
   setBlock: (x: number, y: number, z: number, type: number) => void;
   selectedBlock: number;
+  onPositionChange: (position: THREE.Vector3, euler: THREE.Euler) => void;
+}
+export interface PlayerControlsRef {
+    setPosition: (position: THREE.Vector3, euler: THREE.Euler) => void;
 }
 
-function PlayerControls({
+
+const PlayerControls = forwardRef<PlayerControlsRef, PlayerControlsProps>(({
   worldData,
   setIsLocked,
+  getBlock,
   setBlock,
   selectedBlock,
-}: PlayerControlsProps) {
+  onPositionChange,
+}, ref) => {
   const { camera, gl } = useThree();
   const velocity = useRef(new THREE.Vector3(0, 0, 0));
   const euler = useRef(new THREE.Euler(0, 0, 0, "YXZ"));
   const canJump = useRef(false);
   const isLockedRef = useRef(false);
 
-  // Helper: Get block type at world coordinates
-  const getBlock = useCallback(
-    (x: number, y: number, z: number) => {
-      const chunkX = Math.floor(x / CHUNK_SIZE);
-      const chunkZ = Math.floor(z / CHUNK_SIZE);
-      const chunkKey = `${chunkX}_${chunkZ}`;
-      const chunk = worldData.get(chunkKey);
-      if (!chunk) return BLOCK_AIR;
-
-      const localX = Math.floor(x) - chunkX * CHUNK_SIZE;
-      const localY = Math.floor(y);
-      const localZ = Math.floor(z) - chunkZ * CHUNK_SIZE;
-
-      if (localY < 0 || localY >= CHUNK_HEIGHT) return BLOCK_AIR;
-
-      const idx =
-        localX +
-        localZ * CHUNK_SIZE +
-        localY * (CHUNK_SIZE * CHUNK_SIZE);
-      return chunk[idx];
+  useImperativeHandle(ref, () => ({
+    setPosition: (position: THREE.Vector3, newEuler: THREE.Euler) => {
+        camera.position.copy(position);
+        euler.current.copy(newEuler);
     },
-    [worldData]
-  );
+  }));
 
   const isSolid = (x: number, y: number, z: number) => {
     const block = getBlock(x, y, z);
@@ -189,7 +260,6 @@ function PlayerControls({
   );
 
   useEffect(() => {
-    camera.position.set(8, 80, 20); // Start higher to fall onto terrain
     const onMouseMove = (event: MouseEvent) => {
       if (!isLockedRef.current) return;
       euler.current.y -= event.movementX * 0.002;
@@ -281,6 +351,7 @@ function PlayerControls({
     const onMouseDown = (event: MouseEvent) => {
       if (!isLockedRef.current) return;
       const { hitPos, placePos } = raycast();
+      if(navigator.vibrate) navigator.vibrate(50);
 
       if (event.button === 0) { // Left click
         if (hitPos) {
@@ -323,6 +394,7 @@ function PlayerControls({
   useFrame((_, delta) => {
     if (!isLockedRef.current || worldData.size === 0) return;
 
+    // --- Calculate movement ---
     const moveDirection = new THREE.Vector3();
     if (moveState.forward) moveDirection.z -= 1;
     if (moveState.backward) moveDirection.z += 1;
@@ -335,54 +407,75 @@ function PlayerControls({
     velocity.current.x = moveDirection.x * PLAYER_SPEED;
     velocity.current.z = moveDirection.z * PLAYER_SPEED;
     velocity.current.y += GRAVITY * delta;
+    
+    // --- Collision Detection & Resolution ---
+    const getPlayerAABB = (pos: THREE.Vector3) => {
+      return new THREE.Box3().setFromCenterAndSize(
+          new THREE.Vector3(pos.x, pos.y - PLAYER_HEIGHT / 2, pos.z),
+          new THREE.Vector3(PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_WIDTH)
+      );
+    };
 
-    // Collision detection on each axis
-    const halfWidth = PLAYER_WIDTH / 2;
+    const wouldCollide = (box: THREE.Box3) => {
+      const minX = Math.floor(box.min.x);
+      const maxX = Math.ceil(box.max.x);
+      const minY = Math.floor(box.min.y);
+      const maxY = Math.ceil(box.max.y);
+      const minZ = Math.floor(box.min.z);
+      const maxZ = Math.ceil(box.max.z);
+  
+      for (let y = minY; y < maxY; y++) {
+          for (let z = minZ; z < maxZ; z++) {
+              for (let x = minX; x < maxX; x++) {
+                  if (isSolid(x, y, z)) {
+                      return true;
+                  }
+              }
+          }
+      }
+      return false;
+    };
+
+    // Decompose movement into per-axis steps
+    let dx = velocity.current.x * delta;
+    let dy = velocity.current.y * delta;
+    let dz = velocity.current.z * delta;
 
     // Y-axis collision
-    const dy = velocity.current.y * delta;
-    if (velocity.current.y < 0) { // Moving down
-      if (
-        isSolid(camera.position.x - halfWidth, camera.position.y + dy, camera.position.z - halfWidth) ||
-        isSolid(camera.position.x + halfWidth, camera.position.y + dy, camera.position.z - halfWidth) ||
-        isSolid(camera.position.x - halfWidth, camera.position.y + dy, camera.position.z + halfWidth) ||
-        isSolid(camera.position.x + halfWidth, camera.position.y + dy, camera.position.z + halfWidth)
-      ) {
+    const futureYPos = camera.position.clone();
+    futureYPos.y += dy;
+    if (wouldCollide(getPlayerAABB(futureYPos))) {
+        if (velocity.current.y < 0) canJump.current = true;
         velocity.current.y = 0;
-        canJump.current = true;
-      }
-    } else { // Moving up
-      if (isSolid(camera.position.x, camera.position.y + PLAYER_HEIGHT, camera.position.z)) {
-        velocity.current.y = 0;
-      }
+        dy = 0;
+    } else {
+        canJump.current = false;
     }
-    camera.position.y += velocity.current.y * delta;
+    camera.position.y += dy;
 
     // X-axis collision
-    const dx = velocity.current.x * delta;
-    if (
-      isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - 0.1, camera.position.z) ||
-      isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - PLAYER_HEIGHT / 2, camera.position.z) ||
-      isSolid(camera.position.x + dx + Math.sign(dx) * halfWidth, camera.position.y - PLAYER_HEIGHT + 0.1, camera.position.z)
-    ) {
-      velocity.current.x = 0;
+    const futureXPos = camera.position.clone();
+    futureXPos.x += dx;
+    if (wouldCollide(getPlayerAABB(futureXPos))) {
+        velocity.current.x = 0;
+        dx = 0;
     }
-    camera.position.x += velocity.current.x * delta;
+    camera.position.x += dx;
 
     // Z-axis collision
-    const dz = velocity.current.z * delta;
-    if (
-      isSolid(camera.position.x, camera.position.y - 0.1, camera.position.z + dz + Math.sign(dz) * halfWidth) ||
-      isSolid(camera.position.x, camera.position.y - PLAYER_HEIGHT / 2, camera.position.z + dz + Math.sign(dz) * halfWidth) ||
-      isSolid(camera.position.x, camera.position.y - PLAYER_HEIGHT + 0.1, camera.position.z + dz + Math.sign(dz) * halfWidth)
-    ) {
-      velocity.current.z = 0;
+    const futureZPos = camera.position.clone();
+    futureZPos.z += dz;
+    if (wouldCollide(getPlayerAABB(futureZPos))) {
+        velocity.current.z = 0;
+        dz = 0;
     }
-    camera.position.z += velocity.current.z * delta;
+    camera.position.z += dz;
+
+    onPositionChange(camera.position, euler.current);
   });
 
   return null;
-}
+});
 
 // ---------------------------
 // Main Scene
@@ -390,7 +483,19 @@ function PlayerControls({
 export default function App() {
   const [seed] = useState(12345);
   const [worldData, setWorldData] = useState<Map<string, Uint8Array>>(() => new Map());
+  const [visibleChunks, setVisibleChunks] = useState<[number, number][]>([]);
+  const [playerChunkPos, setPlayerChunkPos] = useState<[number, number]>([0, 0]);
   const [isLocked, setIsLocked] = useState(false);
+  const playerControlsRef = useRef<PlayerControlsRef>(null);
+  const hasSpawned = useRef(false);
+
+  // --- Particles State ---
+  const [particles, setParticles] = useState<ParticleProps[]>([]);
+  const particleId = useRef(0);
+  
+  const removeParticle = useCallback((id: number) => {
+    setParticles(prev => prev.filter(p => p.id !== id));
+  }, []);
 
   // --- Hotbar State ---
   const hotbarBlocks = useMemo(() => [
@@ -413,13 +518,38 @@ export default function App() {
   }, [hotbarBlocks.length]);
 
 
-  const handleChunkDataLoaded = useCallback((key: string, data: Uint8Array) => {
+  const handleChunkGenerated = useCallback((key: string, data: Uint8Array) => {
     setWorldData((prevData) => {
       const newData = new Map(prevData);
       newData.set(key, data);
       return newData;
     });
+    // Save newly generated chunk to DB
+    saveChunkToDB(key, data);
   }, []);
+
+   const getBlock = useCallback(
+    (x: number, y: number, z: number): number => {
+      const chunkX = Math.floor(x / CHUNK_SIZE);
+      const chunkZ = Math.floor(z / CHUNK_SIZE);
+      const chunkKey = `${chunkX}_${chunkZ}`;
+      const chunk = worldData.get(chunkKey);
+      if (!chunk) return BLOCK_AIR;
+
+      const localX = Math.floor(x) - chunkX * CHUNK_SIZE;
+      const localY = Math.floor(y);
+      const localZ = Math.floor(z) - chunkZ * CHUNK_SIZE;
+
+      if (localY < 0 || localY >= CHUNK_HEIGHT) return BLOCK_AIR;
+
+      const idx =
+        localX +
+        localZ * CHUNK_SIZE +
+        localY * (CHUNK_SIZE * CHUNK_SIZE);
+      return chunk[idx];
+    },
+    [worldData]
+  );
 
   const setBlock = useCallback(
     (worldX: number, worldY: number, worldZ: number, type: number) => {
@@ -435,6 +565,23 @@ export default function App() {
 
       const chunkData = worldData.get(chunkKey);
       if (!chunkData) return;
+      
+      if (type === BLOCK_AIR) {
+          const oldBlockType = getBlock(worldX, worldY, worldZ);
+          const material = MATERIALS[oldBlockType];
+          if (material) {
+              for (let i = 0; i < 5; i++) {
+                const newParticle: ParticleProps = {
+                    id: particleId.current++,
+                    position: new THREE.Vector3(worldX + 0.5, worldY + 0.5, worldZ + 0.5),
+                    color: material.color,
+                    onDone: removeParticle,
+                };
+                setParticles(prev => [...prev, newParticle]);
+              }
+          }
+      }
+
 
       const newChunkData = new Uint8Array(chunkData);
       const idx = localX + localZ * CHUNK_SIZE + localY * (CHUNK_SIZE * CHUNK_SIZE);
@@ -445,17 +592,91 @@ export default function App() {
         newData.set(chunkKey, newChunkData);
         return newData;
       });
-    },
-    [worldData]
-  );
 
-  const chunks = useMemo(() => {
-    // simple 3x3 chunk grid around origin
-    const arr: [number, number][] = [];
-    for (let x = -1; x <= 1; x++)
-      for (let z = -1; z <= 1; z++) arr.push([x, z]);
-    return arr;
+      // Save updated chunk to DB
+      saveChunkToDB(chunkKey, newChunkData);
+    },
+    [worldData, getBlock, removeParticle]
+  );
+  
+  // Infinite world streaming logic
+  useEffect(() => {
+    const [pcx, pcz] = playerChunkPos;
+    const newVisibleChunks: [number, number][] = [];
+    const chunksToLoad: [number, number][] = [];
+    
+    for (let x = pcx - RENDER_DISTANCE; x <= pcx + RENDER_DISTANCE; x++) {
+      for (let z = pcz - RENDER_DISTANCE; z <= pcz + RENDER_DISTANCE; z++) {
+        newVisibleChunks.push([x, z]);
+        const key = `${x}_${z}`;
+        if (!worldData.has(key)) {
+            chunksToLoad.push([x,z]);
+        }
+      }
+    }
+    
+    setVisibleChunks(newVisibleChunks);
+    
+    // Load chunks from DB or generate new ones
+    chunksToLoad.forEach(async ([cx, cz]) => {
+        const key = `${cx}_${cz}`;
+        const dbData = await loadChunkFromDB(key);
+        if (dbData) {
+            setWorldData(prev => new Map(prev).set(key, dbData));
+        }
+        // If not in DB, the ChunkMesh component will generate it automatically
+    });
+
+  }, [playerChunkPos, worldData]);
+
+  // Player position change handler
+  const handlePlayerPositionChange = useCallback((position: THREE.Vector3, euler: THREE.Euler) => {
+      const newChunkX = Math.floor(position.x / CHUNK_SIZE);
+      const newChunkZ = Math.floor(position.z / CHUNK_SIZE);
+      if (newChunkX !== playerChunkPos[0] || newChunkZ !== playerChunkPos[1]) {
+          setPlayerChunkPos([newChunkX, newChunkZ]);
+      }
+      // Save player pos to local storage periodically
+      localStorage.setItem('player_pos', JSON.stringify({
+          x: position.x,
+          y: position.y,
+          z: position.z,
+          ex: euler.x,
+          ey: euler.y,
+          ez: euler.z,
+      }));
+  }, [playerChunkPos]);
+
+  // Initial spawn / load player position
+  useEffect(() => {
+    const savedPos = localStorage.getItem('player_pos');
+    if (savedPos && playerControlsRef.current) {
+        const {x, y, z, ex, ey, ez} = JSON.parse(savedPos);
+        playerControlsRef.current.setPosition(new THREE.Vector3(x, y, z), new THREE.Euler(ex, ey, ez));
+        hasSpawned.current = true;
+    }
   }, []);
+
+  // Intelligent Spawning Logic (for first-time players)
+  useEffect(() => {
+    if (hasSpawned.current) return;
+    const centerChunk = worldData.get('0_0');
+    if (centerChunk && playerControlsRef.current) {
+        const spawnX = 8;
+        const spawnZ = 8;
+        let spawnY = CHUNK_HEIGHT;
+        for (let y = CHUNK_HEIGHT - 1; y >= 0; y--) {
+            const idx = spawnX + spawnZ * CHUNK_SIZE + y * (CHUNK_SIZE * CHUNK_SIZE);
+            if (centerChunk[idx] !== BLOCK_AIR) {
+                spawnY = y + PLAYER_HEIGHT + 0.5;
+                break;
+            }
+        }
+        playerControlsRef.current.setPosition(new THREE.Vector3(spawnX, spawnY, spawnZ), new THREE.Euler(0,0,0));
+        hasSpawned.current = true;
+    }
+  }, [worldData]);
+
 
   // --- UI Styles ---
   const crosshairStyle: CSSProperties = {
@@ -521,22 +742,27 @@ export default function App() {
 
         <Sky sunPosition={[100, 200, 100]} turbidity={6} />
 
-        {chunks.map(([cx, cz]) => (
+        {visibleChunks.map(([cx, cz]) => (
           <ChunkMesh
             key={`${cx}_${cz}`}
             chunkX={cx}
             chunkZ={cz}
             seed={seed}
             data={worldData.get(`${cx}_${cz}`)}
-            onChunkDataLoaded={handleChunkDataLoaded}
+            onChunkGenerated={handleChunkGenerated}
           />
         ))}
 
+        {particles.map(p => <Particle key={p.id} {...p} />)}
+
         <PlayerControls
+          ref={playerControlsRef}
           worldData={worldData}
           setIsLocked={setIsLocked}
+          getBlock={getBlock}
           setBlock={setBlock}
           selectedBlock={selectedBlock}
+          onPositionChange={handlePlayerPositionChange}
         />
       </Canvas>
       {isLocked ? (
