@@ -119,14 +119,15 @@ const ChunkMesh: React.FC<ChunkMeshProps> = ({
 // ---------------------------
 interface PlayerControlsProps {
   worldData: Map<string, Uint8Array>;
+  setIsLocked: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
-function PlayerControls({ worldData }: PlayerControlsProps) {
+function PlayerControls({ worldData, setIsLocked }: PlayerControlsProps) {
   const { camera, gl } = useThree();
   const velocity = useRef(new THREE.Vector3(0, 0, 0));
   const euler = useRef(new THREE.Euler(0, 0, 0, "YXZ"));
   const canJump = useRef(false);
-  const [isLocked, setIsLocked] = useState(false);
+  const isLockedRef = useRef(false);
 
   // Helper: Get block type at world coordinates
   const getBlock = useCallback((x: number, y: number, z: number) => {
@@ -165,7 +166,7 @@ function PlayerControls({ worldData }: PlayerControlsProps) {
   useEffect(() => {
     camera.position.set(8, 80, 20); // Start higher to fall onto terrain
     const onMouseMove = (event: MouseEvent) => {
-      if (!isLocked) return;
+      if (!isLockedRef.current) return;
       euler.current.y -= event.movementX * 0.002;
       euler.current.x -= event.movementY * 0.002;
       euler.current.x = Math.max(
@@ -197,7 +198,11 @@ function PlayerControls({ worldData }: PlayerControlsProps) {
     };
 
     const onClick = () => gl.domElement.requestPointerLock();
-    const onPointerLockChange = () => setIsLocked(document.pointerLockElement === gl.domElement);
+    const onPointerLockChange = () => {
+      const locked = document.pointerLockElement === gl.domElement;
+      setIsLocked(locked);
+      isLockedRef.current = locked;
+    };
 
     gl.domElement.addEventListener("click", onClick);
     document.addEventListener("pointerlockchange", onPointerLockChange);
@@ -212,10 +217,10 @@ function PlayerControls({ worldData }: PlayerControlsProps) {
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("keyup", onKeyUp);
     };
-  }, [camera, gl, moveState, euler, isLocked]);
+  }, [camera, gl, moveState, euler, setIsLocked]);
 
   useFrame((_, delta) => {
-    if (!isLocked || worldData.size === 0) return;
+    if (!isLockedRef.current || worldData.size === 0) return;
 
     const moveDirection = new THREE.Vector3();
     if (moveState.forward) moveDirection.z -= 1;
@@ -270,33 +275,7 @@ function PlayerControls({ worldData }: PlayerControlsProps) {
     
   });
 
-  const crosshairStyle: CSSProperties = {
-    position: "absolute", top: "50%", left: "50%",
-    transform: "translate(-50%, -50%)", color: "white",
-    fontSize: "24px", pointerEvents: "none",
-  };
-
-  const instructionsStyle: CSSProperties = {
-    position: "absolute", top: "50%", left: "50%",
-    transform: "translate(-50%, -50%)", backgroundColor: "rgba(0,0,0,0.7)",
-    color: "white", padding: "20px", borderRadius: "10px",
-    textAlign: "center", pointerEvents: "none",
-  };
-
-  return (
-    <>
-      {isLocked ? (
-        <div style={crosshairStyle}>+</div>
-      ) : (
-        <div style={instructionsStyle}>
-          <h1>Click to Play</h1>
-          <p>W, A, S, D to move</p>
-          <p>Space to jump</p>
-          <p>Mouse to look</p>
-        </div>
-      )}
-    </>
-  );
+  return null;
 }
 
 // ---------------------------
@@ -305,6 +284,7 @@ function PlayerControls({ worldData }: PlayerControlsProps) {
 export default function App() {
   const [seed] = useState(12345);
   const [worldData, setWorldData] = useState<Map<string, Uint8Array>>(() => new Map());
+  const [isLocked, setIsLocked] = useState(false);
 
   const handleChunkDataLoaded = useCallback((key: string, data: Uint8Array) => {
     setWorldData(prevData => {
@@ -322,8 +302,21 @@ export default function App() {
     return arr;
   }, []);
 
+  const crosshairStyle: CSSProperties = {
+    position: "absolute", top: "50%", left: "50%",
+    transform: "translate(-50%, -50%)", color: "white",
+    fontSize: "24px", pointerEvents: "none",
+  };
+
+  const instructionsStyle: CSSProperties = {
+    position: "absolute", top: "50%", left: "50%",
+    transform: "translate(-50%, -50%)", backgroundColor: "rgba(0,0,0,0.7)",
+    color: "white", padding: "20px", borderRadius: "10px",
+    textAlign: "center", pointerEvents: "none",
+  };
+
   return (
-    <div style={{ width: '100%', height: '100%' }}>
+    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
       <Canvas shadows dpr={[1, 2]}>
         <ambientLight intensity={0.4} />
         <directionalLight
@@ -346,8 +339,18 @@ export default function App() {
           />
         ))}
 
-        <PlayerControls worldData={worldData} />
+        <PlayerControls worldData={worldData} setIsLocked={setIsLocked} />
       </Canvas>
+      {isLocked ? (
+        <div style={crosshairStyle}>+</div>
+      ) : (
+        <div style={instructionsStyle}>
+          <h1>Click to Play</h1>
+          <p>W, A, S, D to move</p>
+          <p>Space to jump</p>
+          <p>Mouse to look</p>
+        </div>
+      )}
     </div>
   );
 }
